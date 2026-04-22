@@ -319,6 +319,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
             max_tokens=self.client.max_completion_tokens,
             ignore_eos=self.client.ignore_eos,
             streaming=self.client.api_config.streaming,
+            kv_transfer_params=self.client.api_config.kv_transfer_params,
         )
 
         # Add response_format for structured output if configured

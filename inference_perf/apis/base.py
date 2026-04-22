@@ -116,7 +116,7 @@ class InferenceAPIData(BaseModel):
 
     @abstractmethod
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
     ) -> RequestBody:
         raise NotImplementedError
 
@@ -158,7 +158,7 @@ class LazyLoadInferenceAPIData(InferenceAPIData):
         raise NotImplementedError("LazyLoadInferenceAPIData doesn't support this operation")
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
     ) -> RequestBody:
         raise NotImplementedError("LazyLoadInferenceAPIData doesn't support this operation")
 

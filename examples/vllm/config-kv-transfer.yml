@@ -1,0 +1,64 @@
+# Example configuration for using vLLM's KV transfer parameters
+# This enables KV cache transfer between vLLM instances for disaggregated inference
+
+data:
+  type: shareGPT
+  path: path/to/sharegpt.json
+
+load:
+  type: constant
+  stages:
+  - rate: 10
+    duration: 60
+
+api: 
+  type: chat
+  streaming: true
+  # KV transfer parameters for disaggregated inference
+  # These parameters are passed directly to vLLM's API
+  kv_transfer_params:
+    # Connector type for KV cache transfer
+    kv_connector: "PyNcclConnector"
+    
+    # Role of this instance in the KV transfer setup
+    # Options: "kv_producer", "kv_consumer", "kv_both"
+    kv_role: "kv_producer"
+    
+    # Rank of this instance in the distributed setup
+    kv_rank: 0
+    
+    # Total number of instances participating in KV transfer
+    kv_parallel_size: 2
+    
+    # Optional: Buffer size for KV transfer (in bytes)
+    # kv_buffer_size: 1073741824  # 1GB
+    
+    # Optional: IP address for KV transfer communication
+    # kv_ip: "127.0.0.1"
+    
+    # Optional: Port for KV transfer communication
+    # kv_port: 12345
+
+server:
+  type: vllm
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  base_url: http://0.0.0.0:8000
+
+# Optional: Configure storage for results
+storage:
+  local_storage:
+    path: reports-kv-transfer-{timestamp}
+
+# Optional: Configure metrics collection
+metrics:
+  type: prometheus
+  prometheus:
+    url: http://localhost:9090
+    scrape_interval: 15
+
+# Optional: Configure report generation
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: false

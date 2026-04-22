@@ -60,3 +60,4 @@ class APIConfig(BaseModel):
     slo_ttft_header: Optional[str] = None
     response_format: Optional[ResponseFormat] = None
     session_id_header_key: Optional[str] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
