@@ -59,3 +59,4 @@ class APIConfig(BaseModel):
     slo_tpot_header: Optional[str] = None
     slo_ttft_header: Optional[str] = None
     response_format: Optional[ResponseFormat] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None

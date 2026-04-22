@@ -13,7 +13,7 @@
 # limitations under the License.
 import logging
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 from pydantic import ConfigDict, Field
 
 from aiohttp import ClientResponse
@@ -139,7 +139,7 @@ class UserSessionCompletionAPIData(CompletionAPIData):
         return LocalUserSession.get_instance(self.user_session_id)
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
     ) -> RequestBody:
         self._session_context = await self.user_session.get_context(self.target_round)
 
@@ -207,7 +207,7 @@ class UserSessionCompletionAPIData(CompletionAPIData):
         else:
             self.prompt = self._session_context + " " + self.prompt
 
-        return await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming)
+        return await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params)
 
     def update_inference_info(self, inference_info: InferenceInfo) -> None:
         inference_info.extra_info["user_session"] = self.user_session_id

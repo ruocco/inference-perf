@@ -446,7 +446,7 @@ class ChatCompletionAPIData(InferenceAPIData):
         return "/v1/chat/completions"
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
     ) -> RequestBody:
         if self.max_tokens == 0:
             self.max_tokens = max_tokens
@@ -506,6 +506,8 @@ class ChatCompletionAPIData(InferenceAPIData):
                         }
                     )
             payload["tools"] = tools
+        if kv_transfer_params:
+            payload["kv_transfer_params"] = kv_transfer_params
         return payload
 
     def _count_prompt_tokens(self, tokenizer: CustomTokenizer) -> int:

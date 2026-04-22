@@ -229,9 +229,9 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     session_random_string: Optional[str] = None
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        payload = await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming)
+        payload = await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params)
 
         if self.expected_output_is_tool_call and self.tool_definitions:
             payload["ignore_eos"] = False

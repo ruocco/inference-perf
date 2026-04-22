@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from typing import Optional
+from typing import Any, Optional
 
 from aiohttp import ClientResponse
 from inference_perf.apis import InferenceAPIData, InferenceInfo, UnaryResponseMetrics, StreamedResponseMetrics
@@ -35,11 +35,11 @@ class CompletionAPIData(InferenceAPIData):
         return "/v1/completions"
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
     ) -> RequestBody:
         if self.max_tokens == 0:
             self.max_tokens = max_tokens
-        return {
+        payload = {
             "model": effective_model_name,
             "prompt": self.prompt,
             "max_tokens": self.max_tokens,
@@ -47,6 +47,9 @@ class CompletionAPIData(InferenceAPIData):
             "stream": streaming,
             **({"stream_options": {"include_usage": True}} if streaming else {}),
         }
+        if kv_transfer_params:
+            payload["kv_transfer_params"] = kv_transfer_params
+        return payload
 
     async def process_response(
         self, response: ClientResponse, config: APIConfig, tokenizer: CustomTokenizer, lora_adapter: Optional[str] = None
