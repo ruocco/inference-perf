@@ -236,6 +236,7 @@ class ChatCompletionAPIData(InferenceAPIData):
     messages: List[ChatMessage]
     max_tokens: int = 0
     tool_definitions: Optional[List[Dict[str, Any]]] = None
+    kv_transfer_params: Optional[Dict[str, Any]] = None
 
     # Payload-side multimodal spec (sampled per-request). Materialized into the
     # first user message at ``to_request_body`` time using a fresh RNG.
@@ -506,8 +507,9 @@ class ChatCompletionAPIData(InferenceAPIData):
                         }
                     )
             payload["tools"] = tools
-        if kv_transfer_params:
-            payload["kv_transfer_params"] = kv_transfer_params
+        effective_kv_transfer_params = self.kv_transfer_params if self.kv_transfer_params is not None else kv_transfer_params
+        if effective_kv_transfer_params:
+            payload["kv_transfer_params"] = effective_kv_transfer_params
         return payload
 
     def _count_prompt_tokens(self, tokenizer: CustomTokenizer) -> int:

@@ -320,6 +320,7 @@ class RawCall:
     temperature: Optional[float]
     max_tokens_recorded: Optional[int]
     tool_definitions: Optional[List[Dict[str, Any]]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
 
 
 def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -405,6 +406,9 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
                 logger.warning(f"Span {s.get('span_id')}: failed to parse gen_ai.tool.definitions as JSON, ignoring")
         elif isinstance(tool_definitions_raw, list):
             tool_definitions = tool_definitions_raw
+
+        kv_transfer_params = attrs.get("gen_ai.request.kv_transfer_params")
+
         calls.append(
             RawCall(
                 call_id=s.get("span_id") or "",
@@ -419,6 +423,7 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
                 temperature=attrs.get("gen_ai.request.temperature"),
                 max_tokens_recorded=attrs.get("gen_ai.request.max_tokens"),
                 tool_definitions=tool_definitions,
+                kv_transfer_params=kv_transfer_params,
             )
         )
     return calls
@@ -1068,6 +1073,7 @@ def build_graph(
             tool_definitions=rc.tool_definitions,
             expected_output_is_tool_call=effective_is_tool_call,
             expected_output_tool_names=expected_output_tool_names or None,
+            kv_transfer_params=rc.kv_transfer_params,
         )
 
         # Compute wait_ms: gap between when the last predecessor ends and this call starts
@@ -1130,6 +1136,8 @@ def graph_call_to_dict(gc: GraphCall) -> Dict[str, Any]:
         d["expected_output_is_tool_call"] = gc.expected_output_is_tool_call
     if gc.expected_output_tool_names is not None:
         d["expected_output_tool_names"] = gc.expected_output_tool_names
+    if gc.kv_transfer_params is not None:
+        d["kv_transfer_params"] = gc.kv_transfer_params
     return d
 
 
