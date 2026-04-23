@@ -956,6 +956,7 @@ class ReplaySessionEvent:
     predecessor_event_ids: List[str] = field(default_factory=list)
     wait_ms: int = 0
     tool_definitions: Optional[List[Dict[str, Any]]] = None
+    kv_transfer_params: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1153,6 +1154,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
                         predecessor_event_ids=qualified_predecessor_ids,
                         wait_ms=min(event.wait_ms, self.replay_config.max_wait_ms) if self.replay_config else event.wait_ms,
                         tool_definitions=gc.tool_definitions,
+                        kv_transfer_params=gc.kv_transfer_params,
                     )
                 )
 
@@ -1366,6 +1368,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             messages=chat_messages,
             max_tokens=max_tokens,
             tool_definitions=event.tool_definitions,
+            kv_transfer_params=event.kv_transfer_params,
             event_id=event.event_id,
             registry=self.output_registry,
             worker_tracker=getattr(self, "worker_tracker", WorkerSessionTracker()),

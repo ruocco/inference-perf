@@ -321,6 +321,7 @@ class RawCall:
     max_tokens_recorded: Optional[int]
     tool_definitions: Optional[List[Dict[str, Any]]] = None
     extra_attributes: Dict[str, Any] = field(default_factory=dict)
+    kv_transfer_params: Optional[dict[str, Any]] = None
 
 
 def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -417,6 +418,7 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
             "gen_ai.output",
         }
         extra_attrs = {k: v for k, v in attrs.items() if k not in excluded_keys}
+        kv_transfer_params = attrs.get("gen_ai.request.kv_transfer_params")
 
         calls.append(
             RawCall(
@@ -433,6 +435,7 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
                 max_tokens_recorded=attrs.get("gen_ai.request.max_tokens"),
                 tool_definitions=tool_definitions,
                 extra_attributes=extra_attrs,
+                kv_transfer_params=kv_transfer_params,
             )
         )
     return calls
@@ -1084,6 +1087,7 @@ def build_graph(
             expected_output_is_tool_call=effective_is_tool_call,
             expected_output_tool_names=expected_output_tool_names or None,
             attributes=rc.extra_attributes or None,
+            kv_transfer_params=rc.kv_transfer_params,
         )
 
         # Compute wait_ms: gap between when the last predecessor ends and this call starts
@@ -1148,6 +1152,8 @@ def graph_call_to_dict(gc: GraphCall) -> Dict[str, Any]:
         d["expected_output_tool_names"] = gc.expected_output_tool_names
     if gc.attributes is not None:
         d["attributes"] = gc.attributes
+    if gc.kv_transfer_params is not None:
+        d["kv_transfer_params"] = gc.kv_transfer_params
     return d
 
 
