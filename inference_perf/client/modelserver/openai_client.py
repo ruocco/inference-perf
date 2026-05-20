@@ -230,7 +230,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
             # Extract input and output following GenAI semantic conventions
             try:
                 # Extract input based on request type
-                if hasattr(data, "messages") and data.messages:
+                if hasattr(data, "messages"):
                     # Serialize each message, preserving tool_calls when present.
                     input_messages = [msg.to_dict() for msg in data.messages]
                     otel_response_info["input_messages"] = json.dumps(input_messages)
@@ -243,40 +243,11 @@ class openAIModelServerClientSession(ModelServerClientSession):
                     otel_response_info["input_prompt"] = data.prompt
 
                 # Extract output text (gen_ai.output.text)
-                if self.client.api_config.streaming and response_content:
-                    stripped_response = response_content.strip()
-                    if stripped_response.startswith("data:"):
-                        output_parts = []
-                        reasoning_parts = []
-                        tool_call_parts = []
-                        for line in stripped_response.splitlines():
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            payload = line[len("data:") :].strip()
-                            if not payload or payload == "[DONE]":
-                                continue
-                            try:
-                                chunk = json.loads(payload)
-                            except json.JSONDecodeError:
-                                continue
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-                            if delta.get("content"):
-                                output_parts.append(delta["content"])
-                            if delta.get("reasoning_content"):
-                                reasoning_parts.append(delta["reasoning_content"])
-                            if delta.get("tool_calls"):
-                                tool_call_parts.append(delta)
-
-                        if output_parts:
-                            otel_response_info["output_text"] = "".join(output_parts)
-                        if reasoning_parts:
-                            otel_response_info["reasoning_text"] = "".join(reasoning_parts)
-                        if tool_call_parts:
-                            otel_response_info["output_message"] = json.dumps(tool_call_parts)
+                if isinstance(inner, StreamedResponseMetrics):
+                    if hasattr(info, "output_text") and info.output_text:
+                        otel_response_info["output_text"] = info.output_text
+                    if hasattr(info, "output_message") and info.output_message:
+                        otel_response_info["output_message"] = json.dumps(info.output_message)
                 elif response and response.status == 200 and response_content:
                     response_json = json.loads(response_content)
                     choices = response_json.get("choices", [])
