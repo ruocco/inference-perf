@@ -60,3 +60,5 @@ class APIConfig(BaseModel):
     slo_ttft_header: Optional[str] = None
     response_format: Optional[ResponseFormat] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
+    retention_directives: Optional[list[dict[str, Any]]] = None
+    retention_scope: Optional[str] = None

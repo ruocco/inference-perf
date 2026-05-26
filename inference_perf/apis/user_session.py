@@ -139,7 +139,7 @@ class UserSessionCompletionAPIData(CompletionAPIData):
         return LocalUserSession.get_instance(self.user_session_id)
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None, retention_directives: Optional[list[dict[str, Any]]] = None, retention_scope: Optional[str] = None
     ) -> RequestBody:
         self._session_context = await self.user_session.get_context(self.target_round)
 
@@ -207,7 +207,7 @@ class UserSessionCompletionAPIData(CompletionAPIData):
         else:
             self.prompt = self._session_context + " " + self.prompt
 
-        return await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params)
+        return await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params, retention_directives, retention_scope)
 
     def update_inference_info(self, inference_info: InferenceInfo) -> None:
         inference_info.extra_info["user_session"] = self.user_session_id
