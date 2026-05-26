@@ -91,6 +91,8 @@ class GraphCall:
     expected_output_tool_names: Optional[List[str]] = None
     attributes: Optional[Dict[str, Any]] = None
     kv_transfer_params: Optional[Dict[str, Any]] = None
+    retention_directives: Optional[List[Dict[str, Any]]] = None
+    retention_scope: Optional[str] = None
 
 
 @dataclass

@@ -238,6 +238,8 @@ class ChatCompletionAPIData(InferenceAPIData):
     max_tokens: int = 0
     tool_definitions: Optional[List[Dict[str, Any]]] = None
     kv_transfer_params: Optional[Dict[str, Any]] = None
+    retention_directives: Optional[List[Dict[str, Any]]] = None
+    retention_scope: Optional[str] = None
 
     # Payload-side multimodal spec (sampled per-request). Materialized into the
     # first user message at ``to_request_body`` time using a fresh RNG.
@@ -454,7 +456,7 @@ class ChatCompletionAPIData(InferenceAPIData):
         return "/v1/chat/completions"
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None, retention_directives: Optional[list[dict[str, Any]]] = None, retention_scope: Optional[str] = None
     ) -> RequestBody:
         if self.max_tokens == 0:
             self.max_tokens = max_tokens
@@ -517,6 +519,12 @@ class ChatCompletionAPIData(InferenceAPIData):
         effective_kv_transfer_params = self.kv_transfer_params if self.kv_transfer_params is not None else kv_transfer_params
         if effective_kv_transfer_params:
             payload["kv_transfer_params"] = effective_kv_transfer_params
+        effective_retention_directives = self.retention_directives if self.retention_directives is not None else retention_directives
+        if effective_retention_directives:
+            payload["retention_directives"] = effective_retention_directives
+        effective_retention_scope = self.retention_scope if self.retention_scope is not None else retention_scope
+        if effective_retention_scope:
+            payload["retention_scope"] = effective_retention_scope
         return payload
 
     def _count_prompt_tokens(self, tokenizer: CustomTokenizer) -> int:

@@ -300,9 +300,9 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     _substitution_failure_reason: Optional[str] = None
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[Dict[str, Any]] = None
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[Dict[str, Any]] = None, retention_directives: Optional[List[Dict[str, Any]]] = None, retention_scope: Optional[str] = None
     ) -> Dict[str, Any]:
-        payload = await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params)
+        payload = await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming, kv_transfer_params, retention_directives, retention_scope)
 
         if self.expected_output_is_tool_call and self.tool_definitions:
             if self.override_tool_call_max_tokens:
@@ -957,6 +957,8 @@ class ReplaySessionEvent:
     wait_ms: int = 0
     tool_definitions: Optional[List[Dict[str, Any]]] = None
     kv_transfer_params: Optional[Dict[str, Any]] = None
+    retention_directives: Optional[List[Dict[str, Any]]] = None
+    retention_scope: Optional[str] = None
 
 
 @dataclass
@@ -1155,6 +1157,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
                         wait_ms=min(event.wait_ms, self.replay_config.max_wait_ms) if self.replay_config else event.wait_ms,
                         tool_definitions=gc.tool_definitions,
                         kv_transfer_params=gc.kv_transfer_params,
+                        retention_directives=gc.retention_directives,
+                        retention_scope=gc.retention_scope,
                     )
                 )
 
@@ -1369,6 +1373,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             max_tokens=max_tokens,
             tool_definitions=event.tool_definitions,
             kv_transfer_params=event.kv_transfer_params,
+            retention_directives=event.retention_directives,
+            retention_scope=event.retention_scope,
             event_id=event.event_id,
             registry=self.output_registry,
             worker_tracker=getattr(self, "worker_tracker", WorkerSessionTracker()),

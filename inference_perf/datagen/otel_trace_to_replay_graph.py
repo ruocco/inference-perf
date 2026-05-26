@@ -322,6 +322,8 @@ class RawCall:
     tool_definitions: Optional[List[Dict[str, Any]]] = None
     extra_attributes: Dict[str, Any] = field(default_factory=dict)
     kv_transfer_params: Optional[dict[str, Any]] = None
+    retention_directives: Optional[List[Dict[str, Any]]] = None
+    retention_scope: Optional[str] = None
 
 
 def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -420,6 +422,19 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
         extra_attrs = {k: v for k, v in attrs.items() if k not in excluded_keys}
         kv_transfer_params = attrs.get("gen_ai.request.kv_transfer_params")
 
+        retention_directives_raw = attrs.get("gen_ai.request.retention_directives")
+        retention_directives: Optional[List[Dict[str, Any]]] = None
+        if isinstance(retention_directives_raw, str):
+            try:
+                retention_directives = json.loads(retention_directives_raw)
+            except Exception:
+                logger.warning(f"Span {s.get('span_id')}: failed to parse gen_ai.request.retention_directives as JSON, ignoring")
+        elif isinstance(retention_directives_raw, list):
+            retention_directives = retention_directives_raw
+
+        retention_scope_raw = attrs.get("gen_ai.request.retention_scope")
+        retention_scope: Optional[str] = retention_scope_raw if isinstance(retention_scope_raw, str) else None
+
         calls.append(
             RawCall(
                 call_id=s.get("span_id") or "",
@@ -436,6 +451,8 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
                 tool_definitions=tool_definitions,
                 extra_attributes=extra_attrs,
                 kv_transfer_params=kv_transfer_params,
+                retention_directives=retention_directives,
+                retention_scope=retention_scope,
             )
         )
     return calls
@@ -1088,6 +1105,8 @@ def build_graph(
             expected_output_tool_names=expected_output_tool_names or None,
             attributes=rc.extra_attributes or None,
             kv_transfer_params=rc.kv_transfer_params,
+            retention_directives=rc.retention_directives,
+            retention_scope=rc.retention_scope,
         )
 
         # Compute wait_ms: gap between when the last predecessor ends and this call starts
@@ -1154,6 +1173,10 @@ def graph_call_to_dict(gc: GraphCall) -> Dict[str, Any]:
         d["attributes"] = gc.attributes
     if gc.kv_transfer_params is not None:
         d["kv_transfer_params"] = gc.kv_transfer_params
+    if gc.retention_directives is not None:
+        d["retention_directives"] = gc.retention_directives
+    if gc.retention_scope is not None:
+        d["retention_scope"] = gc.retention_scope
     return d
 
 

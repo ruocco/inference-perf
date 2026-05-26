@@ -320,6 +320,8 @@ class openAIModelServerClientSession(ModelServerClientSession):
             ignore_eos=self.client.ignore_eos,
             streaming=self.client.api_config.streaming,
             kv_transfer_params=self.client.api_config.kv_transfer_params,
+            retention_directives=self.client.api_config.retention_directives,
+            retention_scope=self.client.api_config.retention_scope,
         )
 
         # Add response_format for structured output if configured

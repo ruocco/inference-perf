@@ -35,7 +35,7 @@ class CompletionAPIData(InferenceAPIData):
         return "/v1/completions"
 
     async def to_request_body(
-        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool, kv_transfer_params: Optional[dict[str, Any]] = None, retention_directives: Optional[list[dict[str, Any]]] = None, retention_scope: Optional[str] = None
     ) -> RequestBody:
         if self.max_tokens == 0:
             self.max_tokens = max_tokens
@@ -49,6 +49,10 @@ class CompletionAPIData(InferenceAPIData):
         }
         if kv_transfer_params:
             payload["kv_transfer_params"] = kv_transfer_params
+        if retention_directives:
+            payload["retention_directives"] = retention_directives
+        if retention_scope:
+            payload["retention_scope"] = retention_scope
         return payload
 
     async def process_response(

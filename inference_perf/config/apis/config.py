@@ -61,3 +61,5 @@ class APIConfig(BaseModel):
     response_format: Optional[ResponseFormat] = None
     session_id_header_key: Optional[str] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
+    retention_directives: Optional[list[dict[str, Any]]] = None
+    retention_scope: Optional[str] = None
