@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -51,6 +52,56 @@ from inference_perf.datagen.replay_graph_types import InputSegment, ReplayGraph
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
+
+
+# --- demote-bad-args mitigation -----------------------------------------------
+# Server-side parsers can emit malformed JSON in tool_calls[i].function.arguments
+# (e.g. vLLM's qwen3_xml leaks closing XML markers into the JSON string value).
+# Re-sending those bytes verbatim in the next request makes the chat template's
+# json.loads() raise → HTTP 400. We detect this client-side at response time,
+# replace the bad tool_calls with a content-only placeholder so the conversation
+# can continue, and (separately) drop dangling role:tool successors at
+# substitution time so they don't reference the no-longer-present tool_call ids.
+#
+# Gated by env var INFERENCE_PERF_DEMOTE_BAD_ARGS=1 (off by default — preserves
+# the failure mode for benchmarking the upstream bug). Sentinel key on the
+# stored output_message identifies a demoted assistant turn for the substitution
+# path. Per-session demotion counts and event ids are pushed via the existing
+# session_completion_queue and aggregated in the main process.
+_DEMOTE_ENV = "INFERENCE_PERF_DEMOTE_BAD_ARGS"
+_DEMOTE_SENTINEL = "_inference_perf_demoted"
+
+
+def _demote_enabled() -> bool:
+    return os.environ.get(_DEMOTE_ENV, "").strip() not in ("", "0", "false", "False")
+
+
+def _detect_bad_tool_calls(tool_calls: Optional[List[Dict[str, Any]]]) -> List[Tuple[int, str, str]]:
+    """Return [(index, function_name, json_error_msg)] for tool_calls whose
+    arguments fail json.loads. Empty list = all good (or no tool_calls)."""
+    bad: List[Tuple[int, str, str]] = []
+    if not tool_calls:
+        return bad
+    for i, tc in enumerate(tool_calls):
+        fn = tc.get("function") or {}
+        args = fn.get("arguments", "")
+        if not isinstance(args, str):
+            continue
+        try:
+            json.loads(args)
+        except json.JSONDecodeError as e:
+            bad.append((i, fn.get("name", "?"), str(e)))
+    return bad
+
+
+def _demotion_placeholder(event_id: str, bad: List[Tuple[int, str, str]]) -> str:
+    names = [n for (_, n, _) in bad]
+    return (
+        f"[tool call(s) elided at event {event_id}: server returned malformed "
+        f"JSON args for {names!r}; demoted by client (set "
+        f"{_DEMOTE_ENV}=0 to disable)]"
+    )
+# --- end demote-bad-args ------------------------------------------------------
 
 
 class EventFailedError(Exception):
@@ -88,6 +139,7 @@ class WorkerSessionTracker:
     def __init__(self) -> None:
         self._event_completions: Dict[str, Dict[str, float]] = {}
         self._failed_sessions: Set[str] = set()
+        self._demoted_event_ids: Dict[str, List[str]] = {}
 
     def record_event_completed(self, session_id: str, event_id: str, completion_time: float) -> None:
         if session_id not in self._event_completions:
@@ -111,6 +163,12 @@ class WorkerSessionTracker:
 
     def get_session_completion_times(self, session_id: str) -> Dict[str, float]:
         return self._event_completions.get(session_id, {}).copy()
+
+    def record_event_demoted(self, session_id: str, event_id: str) -> None:
+        self._demoted_event_ids.setdefault(session_id, []).append(event_id)
+
+    def get_session_demoted_event_ids(self, session_id: str) -> List[str]:
+        return list(self._demoted_event_ids.get(session_id, []))
 
 
 class EventOutputRegistry:
@@ -288,12 +346,15 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             completion_time = time.perf_counter()
             completed_so_far = self.worker_tracker.get_session_event_count(session_id)
             cancelled = self.total_events_in_session - completed_so_far - 1
+            demoted_ids = self.worker_tracker.get_session_demoted_event_ids(session_id)
             completion_data = {
                 "session_id": session_id,
                 "completion_time": completion_time,
                 "failed": True,
                 "cancelled_events": cancelled,
                 "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+                "demoted_event_ids": demoted_ids,
+                "n_demoted": len(demoted_ids),
             }
             try:
                 self.completion_queue.put_nowait(completion_data)
@@ -377,6 +438,19 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         # which equals the index the message will occupy after the append.
         pending_id_rewrites: List[Tuple[int, List[Dict[str, Any]]]] = []
 
+        # Demoted-assistant positions. The assistant message at this index has
+        # had its tool_calls replaced by a content-only placeholder (because the
+        # live response from the model server emitted malformed JSON arguments
+        # that would break the chat template's json.loads at the next turn).
+        # Any role:tool messages that follow in the original message stream
+        # carry tool_call_id values that no longer resolve to a live tool call
+        # — the post-pass drops them so the server doesn't reject the request
+        # on dangling references. Note: text-wrapped tool-result conventions
+        # (where the tool result is encoded as role:user free-text content) do
+        # not carry tool_call_id and are left untouched; the placeholder text
+        # already explains the elision in-line.
+        pending_demoted_drops: List[int] = []
+
         for seg in self.input_segments:
             seg_msgs = self.original_messages[cursor : cursor + seg.message_count]
 
@@ -396,13 +470,21 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                     actual_message = self.registry.get_message_by_event_id(seg.source_event_id)
                     if actual_message:
                         live_tool_calls = actual_message.get("tool_calls")
-                        if live_tool_calls:
+                        is_demoted = bool(actual_message.get(_DEMOTE_SENTINEL))
+                        if is_demoted:
+                            # Strip the in-band sentinel before we send the message to the
+                            # server. Record the position so the post-pass can drop
+                            # role:tool successors whose tool_call_id no longer resolves.
+                            actual_message = {k: v for k, v in actual_message.items() if k != _DEMOTE_SENTINEL}
+                            pending_demoted_drops.append(len(result))
+                        elif live_tool_calls:
                             # Record the position of this assistant message so the post-pass
                             # can rewrite tool_call_id in the role:tool messages that follow.
                             pending_id_rewrites.append((len(result), live_tool_calls))
                         result.append(actual_message)
                         logger.debug(
                             f"Event {self.event_id}: substituted output segment with structured message from {seg.source_event_id}"
+                            f"{' (demoted; dropping any role:tool successors)' if is_demoted else ''}"
                         )
                     else:
                         actual_output = self.registry.get_output_by_event_id(seg.source_event_id)
@@ -534,6 +616,32 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                         )
                     tool_result_idx += 1
 
+        # Drop role:tool successors of demoted assistant messages. We scan
+        # forward from each demoted-assistant position and remove every
+        # role:tool message until the next non-tool role. Indices are
+        # collected first, then deleted in reverse so earlier indices stay
+        # valid during deletion. This pass runs AFTER the tool_call_id
+        # rewrite pass — they operate on disjoint assistant positions, so
+        # ordering between the two doesn't matter, but doing the drop last
+        # keeps the rewrite logic simpler.
+        if pending_demoted_drops:
+            to_drop: List[int] = []
+            for assistant_idx in pending_demoted_drops:
+                for result_idx in range(assistant_idx + 1, len(result)):
+                    msg = result[result_idx]
+                    if msg.get("role") == "tool":
+                        to_drop.append(result_idx)
+                    else:
+                        break
+            if to_drop:
+                logger.warning(
+                    f"Event {self.event_id}: dropping {len(to_drop)} role:tool "
+                    f"successor(s) of demoted assistant message(s) at positions "
+                    f"{pending_demoted_drops}"
+                )
+                for idx in sorted(to_drop, reverse=True):
+                    del result[idx]
+
         return result
 
     def on_completion(self, info: InferenceInfo) -> None:
@@ -548,6 +656,9 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         session_id = self._extract_session_id()
         event_id = self.event_id.split(":", 1)[1] if ":" in self.event_id else self.event_id
         self.worker_tracker.record_event_completed(session_id, event_id, completion_time)
+        # Demoted-this-event tracking: detect the sentinel set by the response path.
+        if isinstance(output_message, dict) and output_message.get(_DEMOTE_SENTINEL):
+            self.worker_tracker.record_event_demoted(session_id, event_id)
         logger.debug(f"Recorded event completion in worker tracker for {self.event_id}")
 
         completed_count = self.worker_tracker.get_session_event_count(session_id)
@@ -555,11 +666,14 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         if completed_count == self.total_events_in_session:
             logger.debug(f"Session {session_id} completed all {self.total_events_in_session} events in worker")
 
+            demoted_ids = self.worker_tracker.get_session_demoted_event_ids(session_id)
             completion_data = {
                 "session_id": session_id,
                 "completion_time": completion_time,
                 "failed": self.worker_tracker.is_session_failed(session_id),
                 "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+                "demoted_event_ids": demoted_ids,
+                "n_demoted": len(demoted_ids),
             }
 
             if self.completion_queue is not None:
@@ -640,9 +754,23 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             streaming_output_message: Optional[Dict[str, Any]] = None
             if tool_call_chunks:
                 live_tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks)]
-                streaming_output_message = {"role": "assistant", "tool_calls": live_tool_calls}
-                if output_text:
-                    streaming_output_message["content"] = output_text
+                bad = _detect_bad_tool_calls(live_tool_calls) if _demote_enabled() else []
+                if bad:
+                    placeholder = _demotion_placeholder(self.event_id, bad)
+                    logger.warning(
+                        f"Event {self.event_id}: demoting {len(bad)} malformed tool_call(s) "
+                        f"to content placeholder. errors={[e for (_, _, e) in bad]}"
+                    )
+                    streaming_output_message = {
+                        "role": "assistant",
+                        "content": placeholder,
+                        _DEMOTE_SENTINEL: True,
+                    }
+                    output_text = placeholder
+                else:
+                    streaming_output_message = {"role": "assistant", "tool_calls": live_tool_calls}
+                    if output_text:
+                        streaming_output_message["content"] = output_text
             else:
                 streaming_output_message = {"role": "assistant", "content": output_text}
 
@@ -693,7 +821,21 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                 else:
                     output_text = text_content
 
-                if tool_calls:
+                bad = _detect_bad_tool_calls(tool_calls) if (_demote_enabled() and tool_calls) else []
+                if bad:
+                    placeholder = _demotion_placeholder(self.event_id, bad)
+                    logger.warning(
+                        f"Event {self.event_id}: demoting {len(bad)} malformed tool_call(s) "
+                        f"to content placeholder. errors={[e for (_, _, e) in bad]}"
+                    )
+                    output_message = {
+                        "role": "assistant",
+                        "content": placeholder,
+                        _DEMOTE_SENTINEL: True,
+                    }
+                    output_text = placeholder
+                    tool_calls = None  # downstream token accounting sees no tc_text
+                elif tool_calls:
                     output_message = {"role": "assistant", "tool_calls": tool_calls}
                     if output_text:
                         output_message["content"] = output_text
@@ -750,12 +892,15 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             completion_time = time.perf_counter()
             completed_so_far = self.worker_tracker.get_session_event_count(session_id)
             cancelled = self.total_events_in_session - completed_so_far - 1
+            demoted_ids = self.worker_tracker.get_session_demoted_event_ids(session_id)
             completion_data = {
                 "session_id": session_id,
                 "completion_time": completion_time,
                 "failed": True,
                 "cancelled_events": cancelled,
                 "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+                "demoted_event_ids": demoted_ids,
+                "n_demoted": len(demoted_ids),
             }
 
             try:
@@ -788,6 +933,8 @@ class ReplaySessionState:
     failed: bool = False
     cancelled_events: int = 0
     random_string: Optional[str] = None  # Random string for KV-cache invalidation (shared by all events in session)
+    n_demoted: int = 0  # number of events whose live tool_calls failed json.loads and were demoted
+    demoted_event_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -855,6 +1002,14 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         self.sessions: List[ReplaySession] = []
         self.session_graph_state: Dict[str, ReplaySessionState] = {}
         self.all_events: List[ReplaySessionEvent] = []
+
+        # Per-session demote-bad-args summaries, populated as each session's
+        # SessionLifecycleMetric is built. (session_id, source_id, num_events,
+        # n_demoted, demoted_event_ids, failed). The cumulative table is
+        # printed once when len(self._demote_summaries) == len(self.sessions),
+        # which happens on the very last build_session_metric call.
+        self._demote_summaries: List[Dict[str, Any]] = []
+        self._demote_summary_printed = False
 
     def initialize_sessions(self, sessions: List[ReplaySession]) -> None:
         """Finalize generator state from prepared sessions."""
@@ -1075,6 +1230,36 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         num_events_completed = len(state.completed_events)
         num_events_cancelled = state.cancelled_events if state.failed else 0
 
+        # Record + log demote-bad-args summary for this session. Cumulative
+        # table is emitted once on the final session.
+        n_demoted = state.n_demoted
+        demoted_ids = list(state.demoted_event_ids)
+        if _demote_enabled() or n_demoted > 0:
+            self._demote_summaries.append({
+                "session_id": session_id,
+                "source_id": source_id,
+                "num_events": num_events,
+                "n_demoted": n_demoted,
+                "demoted_event_ids": demoted_ids,
+                "failed": state.failed,
+            })
+            if n_demoted > 0:
+                logger.warning(
+                    "DEMOTE-SUMMARY session=%s source=%s events=%d demoted=%d (%.1f%%) ids=%s",
+                    session_id,
+                    source_id,
+                    num_events,
+                    n_demoted,
+                    100.0 * n_demoted / num_events if num_events else 0.0,
+                    demoted_ids,
+                )
+            if (
+                not self._demote_summary_printed
+                and len(self._demote_summaries) >= len(self.sessions) > 0
+            ):
+                self._emit_cumulative_demote_summary()
+                self._demote_summary_printed = True
+
         return SessionLifecycleMetric(
             session_id=session_id,
             stage_id=stage_id,
@@ -1086,6 +1271,67 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             num_events_completed=num_events_completed,
             num_events_cancelled=num_events_cancelled,
         )
+
+    def _emit_cumulative_demote_summary(self) -> None:
+        """Print a per-session table and a cumulative total of how many events
+        were demoted by the demote-bad-args mitigation. Called once, at the
+        very end of the run, after the last session's lifecycle metric is
+        built. Output goes to logger.warning so it survives default log levels
+        and is easy to grep."""
+        rows = list(self._demote_summaries)
+        n_sessions = len(rows)
+        n_sessions_with_demote = sum(1 for r in rows if r["n_demoted"] > 0)
+        total_events = sum(r["num_events"] for r in rows)
+        total_demoted = sum(r["n_demoted"] for r in rows)
+        # Pick the spans across the trace where demotions hit (smallest +
+        # largest event_id index per session, plus first/last hit globally).
+        # Event ids in graphs are typically formatted like "event_NNN"; we
+        # extract the trailing integer when present, otherwise fall back to
+        # lexicographic ordering. This stays generic across trace sources.
+        def _event_idx(eid: str) -> Optional[int]:
+            m = re.search(r"(\d+)$", eid or "")
+            return int(m.group(1)) if m else None
+
+        header = (
+            "DEMOTE-BAD-ARGS SUMMARY",
+            "session_id",
+            "source",
+            "events",
+            "demoted",
+            "%",
+            "first->last_demoted_event",
+            "failed",
+        )
+        # Build the table as a single multi-line string so it's emitted in one log record.
+        lines = ["", "=" * 110, "DEMOTE-BAD-ARGS SUMMARY (mitigation: --demote-bad-args)"]
+        lines.append("-" * 110)
+        lines.append(f"{'session_id':<32}  {'events':>6}  {'demoted':>7}  {'%':>5}  {'first->last':<28}  failed  source")
+        lines.append("-" * 110)
+        for r in sorted(rows, key=lambda x: (-x["n_demoted"], x["session_id"])):
+            ids = r["demoted_event_ids"]
+            if ids:
+                first, last = ids[0], ids[-1]
+                span = f"{first} -> {last}" if first != last else first
+            else:
+                span = "-"
+            pct = (100.0 * r["n_demoted"] / r["num_events"]) if r["num_events"] else 0.0
+            lines.append(
+                f"{r['session_id'][:32]:<32}  "
+                f"{r['num_events']:>6}  "
+                f"{r['n_demoted']:>7}  "
+                f"{pct:>4.1f}%  "
+                f"{span:<28}  "
+                f"{'Y' if r['failed'] else 'N':<6}  "
+                f"{r['source_id']}"
+            )
+        lines.append("-" * 110)
+        cum_pct = (100.0 * total_demoted / total_events) if total_events else 0.0
+        lines.append(
+            f"CUMULATIVE: sessions={n_sessions} (with_demote={n_sessions_with_demote}) "
+            f"events_total={total_events} demoted_total={total_demoted} ({cum_pct:.2f}%)"
+        )
+        lines.append("=" * 110)
+        logger.warning("\n".join(lines))
 
     def activate_session(self, session_id: str) -> None:
         state = self.session_graph_state.get(session_id)
@@ -1118,10 +1364,14 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
                     completed_state.is_complete = True
                     completed_state.failed = completion_data.get("failed", False)
                     completed_state.cancelled_events = completion_data.get("cancelled_events", 0)
+                    demoted_ids = completion_data.get("demoted_event_ids") or []
+                    completed_state.demoted_event_ids = list(demoted_ids)
+                    completed_state.n_demoted = int(completion_data.get("n_demoted") or len(demoted_ids))
                     logger.debug(
-                        "Session %s marked complete from queue notification (failed=%s)",
+                        "Session %s marked complete from queue notification (failed=%s, n_demoted=%d)",
                         completed_session_id,
                         completed_state.failed,
+                        completed_state.n_demoted,
                     )
         except Exception:
             pass
