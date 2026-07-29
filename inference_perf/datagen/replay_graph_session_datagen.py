@@ -274,7 +274,15 @@ class EventOutputRegistry:
     def is_event_failed(self, event_id: str) -> bool:
         return event_id in self._failed_event_ids
 
-    async def require_async(self, event_id: str, timeout_sec: float = 3600.0) -> str:
+    async def require_async(self, event_id: str, timeout_sec: Optional[float] = None) -> str:
+        """Await the output of `event_id`.
+
+        `timeout_sec=None` (the default) waits indefinitely — asyncio.wait_for with
+        timeout=None simply awaits, so the TimeoutError branch below is unreachable in
+        that case. Failure propagation is independent of the timeout: record_failure
+        sets this same signal, so a failing predecessor wakes its successors at once
+        and they raise EventFailedError below.
+        """
         if event_id in self._failed_event_ids:
             raise EventFailedError(event_id)
 
@@ -347,6 +355,9 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     # output; the recorded assistant messages are sent as-is. Predecessor wait
     # timing is still enforced.
     disable_output_substitution: bool = False
+    # Seconds to wait for predecessors before failing this event. None (default) waits
+    # indefinitely; see SessionReplayConfig.predecessor_wait_timeout_sec.
+    predecessor_wait_timeout_sec: Optional[float] = None
     # Set by _build_messages_with_substitution when it calls record_failure
     # early (e.g. recorded fallback also malformed). Lets the caller pass the
     # right reason string to _fail_and_notify instead of a generic fallback.
@@ -468,7 +479,10 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             logger.debug(f"Event {self.event_id} waiting for {len(self.predecessor_event_ids)} predecessor(s)")
             try:
                 await asyncio.gather(
-                    *[self.registry.require_async(event_id, timeout_sec=3600.0) for event_id in self.predecessor_event_ids]
+                    *[
+                        self.registry.require_async(event_id, timeout_sec=self.predecessor_wait_timeout_sec)
+                        for event_id in self.predecessor_event_ids
+                    ]
                 )
             except EventFailedError:
                 self._fail_and_notify(session_id, "predecessor failed")
@@ -1751,6 +1765,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             disable_output_substitution=getattr(self.replay_config, "disable_output_substitution", False)
             if self.replay_config
             else False,
+            predecessor_wait_timeout_sec=getattr(self.replay_config, "predecessor_wait_timeout_sec", None)
+            if self.replay_config
+            else None,
             # Back-reference so the event can evict this session from the worker once drained.
             generator=self,
         )

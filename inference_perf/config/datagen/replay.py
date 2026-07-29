@@ -131,6 +131,18 @@ class SessionReplayConfig(BaseModel):
         ge=0,
         description="Maximum inter-event wait time in milliseconds. Caps the delay between predecessor completion and event dispatch to avoid reproducing unusually long tool/agent execution times from the original trace.",
     )
+    predecessor_wait_timeout_sec: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Seconds an event waits for its predecessors to complete before failing. "
+            "None (the default) waits indefinitely: a deep sequential chain is slow, "
+            "not stuck, and a fixed bound spuriously fails valid sessions whose "
+            "cumulative ancestor latency exceeds it. Predecessor *failure* still fails "
+            "the successor immediately regardless of this setting, so an indefinite "
+            "wait cannot outlive a broken chain."
+        ),
+    )
 
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
