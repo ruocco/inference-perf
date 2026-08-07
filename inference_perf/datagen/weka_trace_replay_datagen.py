@@ -72,6 +72,7 @@ from inference_perf.datagen.replay_graph_session_datagen import (
     ReplaySession,
     ReplayGraphSessionGeneratorBase,
 )
+from inference_perf.datagen.otel_trace_replay_datagen import _compile_filter
 from inference_perf.datagen.otel_trace_to_replay_graph import (
     RawCall,
     build_graph,
@@ -645,9 +646,40 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         sessions = self._build_sessions_from_traces(traces)
         self.initialize_sessions(sessions)
 
+    @staticmethod
+    def _augment_for_filter(blob: Dict[str, Any]) -> Dict[str, Any]:
+        """Add derived per-trace aggregates for filter expressions."""
+        requests = blob.get("requests") or []
+        flat: List[Dict[str, Any]] = []
+        for entry in requests:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") == "subagent":
+                flat.extend(r for r in (entry.get("requests") or []) if isinstance(r, dict))
+            else:
+                flat.append(entry)
+
+        # input+output per request, matching the OTel datagen
+        request_tokens = [(r.get("in") or 0) + (r.get("out") or 0) for r in flat]
+        derived = {
+            "max_tokens": max(request_tokens, default=0),
+            "total_tokens": sum(request_tokens),
+            "num_turns": len(flat),
+        }
+        return {**derived, **blob}
+
+    def _keep_trace(self, blob: Dict[str, Any], filter_func: Optional[Any]) -> bool:
+        if filter_func is None:
+            return True
+        return bool(filter_func(self._augment_for_filter(blob)))
+
     def _load_weka_traces(self) -> List[WekaTrace]:
         """Loads traces from directories, files, or Hugging Face dataset."""
         raw_traces: List[WekaTrace] = []
+        filter_func = _compile_filter(self.weka_config.filter)
+        if filter_func:
+            logger.info(f"Using filter expression: {self.weka_config.filter}")
+        n_filtered = 0
 
         if self.weka_config.trace_directory:
             trace_dir = Path(self.weka_config.trace_directory)
@@ -660,6 +692,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             for f in files:
                 try:
                     blob = json.loads(f.read_text(encoding="utf-8"))
+                    if not self._keep_trace(blob, filter_func):
+                        n_filtered += 1
+                        continue
                     raw_traces.append(WekaTrace.model_validate(blob))
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
@@ -673,6 +708,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     raise ValueError(f"Trace file does not exist: {path}")
                 try:
                     blob = json.loads(f.read_text(encoding="utf-8"))
+                    if not self._keep_trace(blob, filter_func):
+                        n_filtered += 1
+                        continue
                     raw_traces.append(WekaTrace.model_validate(blob))
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
@@ -691,11 +729,15 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
                 with open(local_path, "r", encoding="utf-8") as file_stream:
                     for line_idx, line in enumerate(file_stream):
-                        if line_idx >= self.weka_config.num_dataset_entries:
+                        # caps accepted traces, not lines scanned
+                        if len(raw_traces) >= self.weka_config.num_dataset_entries:
                             break
                         if line.strip():
                             try:
                                 blob = json.loads(line)
+                                if not self._keep_trace(blob, filter_func):
+                                    n_filtered += 1
+                                    continue
                                 raw_traces.append(WekaTrace.model_validate(blob))
                             except Exception as e:
                                 logger.error(f"Failed to validate row {line_idx}: {e}")
@@ -703,6 +745,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                                     raise
             except Exception as e:
                 raise ValueError(f"Failed to load Hugging Face dataset {repo_id}: {e}") from e
+
+        if filter_func:
+            logger.info(f"Filter applied: {n_filtered + len(raw_traces)} -> {len(raw_traces)} traces")
 
         # Ensure unique trace IDs
         unique_traces: Dict[str, WekaTrace] = {}

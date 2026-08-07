@@ -14,12 +14,16 @@
 
 import json
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
+
+import pytest
 
 from inference_perf.config import APIConfig, APIType, DataConfig, DataGenType
 from inference_perf.datagen.weka_trace_replay_datagen import (
     HashIdRandomGenerator,
     WekaTraceReplayDataGenerator,
+    WekaTrace,
     RoleSegment,
     ConversationReconstructor,
     longest_common_prefix,
@@ -305,3 +309,114 @@ def test_weka_trace_replay_generator_mock_no_warp(tmp_path: Path) -> None:
     assert events[0].t_start_ms == 100
     assert events[1].t_start_ms == 100100
     assert events[1].wait_ms == 100100 - events[0].t_end_ms
+
+
+def _filter_trace(trace_id: str, peak_in: int, out: int = 2, subagent_in: int = 0) -> Dict[str, Any]:
+    requests: List[Dict[str, Any]] = [
+        {"t": 0.1, "type": "n", "model": "m", "in": peak_in, "out": out, "hash_ids": [1]},
+    ]
+    if subagent_in:
+        requests.append(
+            {
+                "t": 0.2,
+                "type": "subagent",
+                "agent_id": "a1",
+                "subagent_type": "Subagent",
+                "requests": [{"t": 0.3, "type": "n", "model": "m", "in": subagent_in, "out": out, "hash_ids": [2]}],
+            }
+        )
+    return {"id": trace_id, "models": ["m"], "block_size": 2, "requests": requests}
+
+
+def _load_with_filter(
+    tmp_path: Path, traces: List[Dict[str, Any]], filter_expr: Optional[str], **kwargs: Any
+) -> List[WekaTrace]:
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    for i, trace in enumerate(traces):
+        (tmp_path / f"trace_{i:03d}.json").write_text(json.dumps(trace))
+
+    weka_cfg = WekaTraceReplayConfig(
+        trace_directory=str(tmp_path),
+        default_block_size=2,
+        filter=filter_expr,
+        **kwargs,
+    )
+    gen = WekaTraceReplayDataGenerator.__new__(WekaTraceReplayDataGenerator)
+    gen.weka_config = weka_cfg
+    return WekaTraceReplayDataGenerator._load_weka_traces(gen)
+
+
+def test_augment_for_filter_derives_aggregates() -> None:
+    blob = _filter_trace("t1", peak_in=100, out=5, subagent_in=300)
+    augmented = WekaTraceReplayDataGenerator._augment_for_filter(blob)
+
+    # sub-agent inners count too
+    assert augmented["max_tokens"] == 300 + 5
+    assert augmented["total_tokens"] == 100 + 300 + 5 + 5
+    assert augmented["num_turns"] == 2
+    assert augmented["id"] == "t1"
+
+
+def test_augment_for_filter_does_not_overwrite_recorded_keys() -> None:
+    blob = _filter_trace("t1", peak_in=100)
+    blob["max_tokens"] = 999
+    assert WekaTraceReplayDataGenerator._augment_for_filter(blob)["max_tokens"] == 999
+
+
+def test_filter_selects_traces_by_max_tokens(tmp_path: Path) -> None:
+    traces = [_filter_trace("small", peak_in=100), _filter_trace("big", peak_in=500)]
+    kept = _load_with_filter(tmp_path, traces, "lambda x: x['max_tokens'] < 262144")
+    assert [t.id for t in kept] == ["small", "big"]
+
+    kept = _load_with_filter(tmp_path, traces, "lambda x: x['max_tokens'] < 200")
+    assert [t.id for t in kept] == ["small"]
+
+
+def test_filter_none_keeps_every_trace(tmp_path: Path) -> None:
+    traces = [_filter_trace("a", peak_in=100), _filter_trace("b", peak_in=500)]
+    assert len(_load_with_filter(tmp_path, traces, None)) == 2
+
+
+def test_filter_rejecting_all_traces_yields_nothing(tmp_path: Path) -> None:
+    traces = [_filter_trace("a", peak_in=100)]
+    assert _load_with_filter(tmp_path, traces, "lambda x: x['max_tokens'] < 1") == []
+
+
+def test_filter_with_unknown_key_raises(tmp_path: Path) -> None:
+    traces = [_filter_trace("a", peak_in=100)]
+    with pytest.raises(KeyError, match="benchmark"):
+        _load_with_filter(tmp_path, traces, "lambda x: x['benchmark'] == 'swebench'")
+
+
+def test_malformed_filter_expression_raises(tmp_path: Path) -> None:
+    traces = [_filter_trace("a", peak_in=100)]
+    with pytest.raises(ValueError, match="Invalid filter expression syntax"):
+        _load_with_filter(tmp_path, traces, "lambda x: (")
+
+
+def test_num_dataset_entries_counts_kept_traces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+    from inference_perf.datagen import weka_trace_replay_datagen as mod
+
+    jsonl = tmp_path / "traces.jsonl"
+    jsonl.write_text("\n".join(json.dumps(_filter_trace(f"t{i}", peak_in=100 if i % 2 == 0 else 500)) for i in range(10)))
+    monkeypatch.setattr(mod, "hf_hub_download", lambda **kwargs: str(jsonl))
+
+    def load(num_entries: int, filter_expr: Optional[str]) -> List[WekaTrace]:
+        cfg = WekaTraceReplayConfig(
+            hf_dataset_path="org/dataset",
+            default_block_size=2,
+            num_dataset_entries=num_entries,
+            filter=filter_expr,
+        )
+        gen = WekaTraceReplayDataGenerator.__new__(WekaTraceReplayDataGenerator)
+        gen.weka_config = cfg
+        return WekaTraceReplayDataGenerator._load_weka_traces(gen)
+
+    assert [t.id for t in load(3, None)] == ["t0", "t1", "t2"]
+
+    # counts accepted traces, scanning deeper to fill the quota
+    assert [t.id for t in load(3, "lambda x: x['max_tokens'] < 200")] == ["t0", "t2", "t4"]
+
+    assert len(load(99, "lambda x: x['max_tokens'] < 200")) == 5
